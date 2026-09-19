@@ -176,10 +176,14 @@ index 57ca1b1..d3faaa2 100644
  
      private fun requestNotifIfNeeded() {
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
-index cb993dd..89ba6e5 100644
+index cb993dd..7a8a580 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
-@@ -4,14 +4,25 @@ import android.accessibilityservice.AccessibilityService
+@@ -1,17 +1,29 @@
+ package com.cybertkr.suboverlay.a11y
+ 
+ import android.accessibilityservice.AccessibilityService
++import android.content.Intent
  import android.os.Handler
  import android.os.Looper
  import android.os.SystemClock
@@ -205,9 +209,20 @@ index cb993dd..89ba6e5 100644
      private val poll = object : Runnable {
          override fun run() {
              readOnce()
-@@ -25,7 +36,8 @@ class SubtitleSyncService : AccessibilityService() {
+@@ -20,12 +32,19 @@ class SubtitleSyncService : AccessibilityService() {
      }
  
+     override fun onServiceConnected() {
++        OverlayService.a11yConnected = true
+         handler.removeCallbacks(poll)
+         handler.post(poll)
+     }
+ 
++    override fun onUnbind(intent: Intent?): Boolean {
++        OverlayService.a11yConnected = false
++        return super.onUnbind(intent)
++    }
++
      override fun onAccessibilityEvent(event: AccessibilityEvent?) {
 -        if (event?.packageName == "com.netflix.mediaclient") readOnce()
 +        val pkg = event?.packageName?.toString() ?: return
@@ -215,7 +230,7 @@ index cb993dd..89ba6e5 100644
      }
  
      override fun onInterrupt() {}
-@@ -35,14 +47,67 @@ class SubtitleSyncService : AccessibilityService() {
+@@ -35,17 +54,99 @@ class SubtitleSyncService : AccessibilityService() {
          super.onDestroy()
      }
  
@@ -227,9 +242,10 @@ index cb993dd..89ba6e5 100644
 +     * Outside of that mode every key is passed through to Netflix untouched.
 +     */
 +    override fun onKeyEvent(event: KeyEvent): Boolean {
-+        if (!OverlayService.isActive() || !OverlayService.netflixSeenRecently()) return false
 +        val code = event.keyCode
 +        val down = event.action == KeyEvent.ACTION_DOWN
++        if (down) OverlayService.dbgKey = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
++        if (!OverlayService.isActive() || !OverlayService.netflixSeenRecently()) return false
 +
 +        if (OverlayService.isAdjusting()) {
 +            val delta: Long? = when (code) {
@@ -267,25 +283,58 @@ index cb993dd..89ba6e5 100644
 +        return false
 +    }
 +
++    private fun isNetflix(node: AccessibilityNodeInfo): Boolean =
++        node.packageName?.toString()?.let { it in NETFLIX_PACKAGES } == true
++
++    // The Netflix window is not always the "active" one on TVs, so look through all windows too.
++    private fun findNetflixRoot(): AccessibilityNodeInfo? {
++        val active = rootInActiveWindow
++        if (active != null && isNetflix(active)) {
++            OverlayService.dbgWin = active.packageName.toString().removePrefix("com.")
++            return active
++        }
++        try {
++            for (w in windows) {
++                val r = w.root ?: continue
++                if (isNetflix(r)) {
++                    OverlayService.dbgWin = r.packageName.toString().removePrefix("com.")
++                    return r
++                }
++            }
++        } catch (_: Exception) {
++        }
++        OverlayService.dbgWin = active?.packageName?.toString()?.removePrefix("com.") ?: "none"
++        return null
++    }
++
      private fun readOnce() {
          val nowUp = SystemClock.uptimeMillis()
          if (nowUp - lastRead < 120L) return
          lastRead = nowUp
-         val root = rootInActiveWindow ?: return
+-        val root = rootInActiveWindow ?: return
 -        if (root.packageName != "com.netflix.mediaclient") return
-+        val rootPkg = root.packageName?.toString() ?: return
-+        if (rootPkg !in NETFLIX_PACKAGES) return
++        val root = findNetflixRoot() ?: return
          OverlayService.markNetflixForeground()
 -        val sb = findByTag(root, "seekbar") ?: return
+-        val ri = sb.rangeInfo ?: return
 +        val sb = findByTag(root, "seekbar") ?: findRangeNode(root)
 +        if (sb == null) {
++            OverlayService.dbgBar = "no"
 +            dumpTreeThrottled(root)
 +            return
 +        }
-         val ri = sb.rangeInfo ?: return
++        val ri = sb.rangeInfo
++        if (ri == null) {
++            OverlayService.dbgBar = "norange"
++            return
++        }
          val posMs = ri.current.toLong()
          val totalMs = ri.max.toLong()
-@@ -58,4 +123,41 @@ class SubtitleSyncService : AccessibilityService() {
++        OverlayService.dbgBar = "${posMs / 1000}s/${totalMs / 1000}s"
+         if (posMs < 0 || totalMs <= 0) return
+         OverlayService.bridgePosition(posMs, totalMs)
+     }
+@@ -58,4 +159,41 @@ class SubtitleSyncService : AccessibilityService() {
          }
          return null
      }
@@ -328,14 +377,20 @@ index cb993dd..89ba6e5 100644
 +    }
  }
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-index b555f02..aebd606 100644
+index b555f02..3c08e46 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-@@ -40,6 +40,37 @@ class OverlayService : LifecycleService() {
+@@ -40,6 +40,43 @@ class OverlayService : LifecycleService() {
              instance?.lastNetflixSeen = android.os.SystemClock.elapsedRealtime()
          }
  
 +        fun isActive(): Boolean = instance != null
++
++        // Debug status shown on screen until the first sync (helps on TVs without a computer at hand)
++        @Volatile var a11yConnected = false
++        @Volatile var dbgWin = "-"
++        @Volatile var dbgBar = "-"
++        @Volatile var dbgKey = "-"
 +
 +        fun netflixSeenRecently(): Boolean {
 +            val s = instance ?: return false
@@ -369,7 +424,7 @@ index b555f02..aebd606 100644
          fun bridgePosition(posMs: Long, totalMs: Long) {
              val s = instance ?: return
              if (totalMs > 0L) s.totalMs = totalMs
-@@ -60,6 +91,7 @@ class OverlayService : LifecycleService() {
+@@ -60,6 +97,7 @@ class OverlayService : LifecycleService() {
      private var totalMs: Long = 0L
      private var autoSynced = false
      @Volatile private var lastNetflixSeen = 0L
@@ -377,13 +432,14 @@ index b555f02..aebd606 100644
      private var userOffsetMs = 0L
      private val settings by lazy { com.cybertkr.suboverlay.SettingsStore(this) }
  
-@@ -72,7 +104,12 @@ class OverlayService : LifecycleService() {
+@@ -72,7 +110,13 @@ class OverlayService : LifecycleService() {
              val now = SystemClock.elapsedRealtime()
              val pos = clock.position(now)
              val hidden = now - lastNetflixSeen >= 3000L
 -            subtitleView.setLine(if (hidden) null else engine.cueAt(pos)?.text)
 +            val line = when {
 +                now < adjustUntil -> adjustHud()
++                !autoSynced -> debugHud(hidden)
 +                hidden -> null
 +                else -> engine.cueAt(pos)?.text
 +            }
@@ -391,7 +447,7 @@ index b555f02..aebd606 100644
              if (this@OverlayService::bubble.isInitialized) {
                  bubble.updateTime(pos.coerceIn(0, totalMs), totalMs)
              }
-@@ -109,18 +146,25 @@ class OverlayService : LifecycleService() {
+@@ -109,18 +153,30 @@ class OverlayService : LifecycleService() {
          ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = 160 }
  
          bubble = ControlBubble(this, wm, bubbleParams, object : ControlBubble.Callbacks {
@@ -415,6 +471,11 @@ index b555f02..aebd606 100644
 +        val t = com.cybertkr.suboverlay.SubtitleRepository.title
 +        if (t != null) lifecycleScope.launch { settings.setOffset(t, userOffsetMs) }
 +    }
++
++    private fun debugHud(hidden: Boolean): String =
++        "Subly+ debug (disappears once synced)\n" +
++            "a11y=${if (a11yConnected) "ON" else "OFF"}  win=$dbgWin  bar=$dbgBar\n" +
++            "netflix=${if (hidden) "no" else "yes"}  lastKey=$dbgKey  cues=${SubtitleRepository.cues.size}"
 +
 +    private fun adjustHud(): String {
 +        val secs = String.format(java.util.Locale.US, "%+.1f", userOffsetMs / 1000.0)
@@ -471,14 +532,14 @@ index 99bc1d6..a32b985 100644
 +    <string name="tv_no_picker_help" translatable="false">This device has no file picker. Copy your .srt file into this folder from a computer, then tap Choose again:\n\n%1$s\n\nadb push file.srt %1$s/</string>
  </resources>
 diff --git a/app/src/main/res/xml/a11y_config.xml b/app/src/main/res/xml/a11y_config.xml
-index b6f2384..9fbd46c 100644
+index b6f2384..5075f16 100644
 --- a/app/src/main/res/xml/a11y_config.xml
 +++ b/app/src/main/res/xml/a11y_config.xml
 @@ -3,6 +3,8 @@
      android:description="@string/a11y_desc"
      android:accessibilityEventTypes="typeViewClicked|typeWindowContentChanged|typeWindowStateChanged"
      android:accessibilityFeedbackType="feedbackGeneric"
-+    android:accessibilityFlags="flagRequestFilterKeyEvents"
++    android:accessibilityFlags="flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows"
 +    android:canRequestFilterKeyEvents="true"
      android:canRetrieveWindowContent="true"
 -    android:packageNames="com.netflix.mediaclient"
