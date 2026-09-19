@@ -1,0 +1,486 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index a0cd127..36ac12c 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -6,8 +6,12 @@
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+ 
++    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
++    <uses-feature android:name="android.software.leanback" android:required="false" />
++
+     <application
+         android:allowBackup="true"
++        android:banner="@drawable/banner"
+         android:icon="@mipmap/ic_launcher"
+         android:roundIcon="@mipmap/ic_launcher_round"
+         android:label="@string/app_name"
+@@ -20,6 +24,7 @@
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
++                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+             </intent-filter>
+         </activity>
+ 
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
+index 57ca1b1..d3faaa2 100644
+--- a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
+@@ -1,6 +1,8 @@
+ package com.cybertkr.suboverlay
+ 
++import android.content.ActivityNotFoundException
+ import android.content.Intent
++import android.content.pm.PackageManager
+ import android.net.Uri
+ import android.os.Build
+ import android.os.Bundle
+@@ -35,20 +37,15 @@ class MainActivity : AppCompatActivity() {
+         binding = ActivityMainBinding.inflate(layoutInflater)
+         setContentView(binding.root)
+ 
+-        binding.pickSrt.setOnClickListener {
+-            pickSrtLauncher.launch(arrayOf("application/x-subrip", "text/plain", "*/*"))
+-        }
++        binding.pickSrt.setOnClickListener { pickSubtitle() }
++        tvFocus(binding.pickSrt)
++        tvFocus(binding.startOverlay)
++        tvFocus(binding.permBanner)
+ 
+         binding.startOverlay.setOnClickListener {
+             requestNotifIfNeeded()
+             if (!Settings.canDrawOverlays(this)) {
+-                startActivity(
+-                    Intent(
+-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+-                        Uri.parse("package:$packageName")
+-                    )
+-                )
+-                Toast.makeText(this, getString(R.string.perm_hint), Toast.LENGTH_LONG).show()
++                requestOverlayPermission()
+                 return@setOnClickListener
+             }
+             startForegroundService(
+@@ -73,14 +70,7 @@ class MainActivity : AppCompatActivity() {
+             !overlayOk -> {
+                 binding.permBanner.visibility = View.VISIBLE
+                 binding.permBannerText.setText(R.string.perm_warn_overlay)
+-                binding.permBanner.setOnClickListener {
+-                    startActivity(
+-                        Intent(
+-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+-                            Uri.parse("package:$packageName")
+-                        )
+-                    )
+-                }
++                binding.permBanner.setOnClickListener { requestOverlayPermission() }
+             }
+             !a11yOk -> {
+                 binding.permBanner.visibility = View.VISIBLE
+@@ -112,7 +102,12 @@ class MainActivity : AppCompatActivity() {
+         try {
+             startActivity(intent)
+         } catch (_: Exception) {
+-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
++            try {
++                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
++            } catch (_: Exception) {
++                showAdbHelp(getString(R.string.tv_a11y_help))
++                return
++            }
+         }
+         Toast.makeText(this, getString(R.string.perm_a11y_hint), Toast.LENGTH_LONG).show()
+     }
+@@ -175,7 +170,7 @@ class MainActivity : AppCompatActivity() {
+     private fun loadSrt(uri: Uri) {
+         try {
+             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+-        } catch (_: SecurityException) {
++        } catch (_: Exception) {
+         }
+         val bytes = try {
+             contentResolver.openInputStream(uri)?.use { it.readBytes() }
+@@ -248,8 +243,10 @@ class MainActivity : AppCompatActivity() {
+                     isClickable = true
+                     setBackgroundResource(R.drawable.btn_secondary)
+                     setTextColor(0xFF2E7CF6.toInt())
++                    isFocusable = true
+                     setOnClickListener { loadSrt(Uri.parse(uriStr)) }
+                 }
++                tvFocus(row)
+                 val lp = LinearLayout.LayoutParams(
+                     LinearLayout.LayoutParams.MATCH_PARENT,
+                     LinearLayout.LayoutParams.WRAP_CONTENT
+@@ -259,6 +256,62 @@ class MainActivity : AppCompatActivity() {
+         }
+     }
+ 
++    private val isTv: Boolean
++        get() = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
++
++    private fun localSrtFiles(): List<java.io.File> {
++        val dir = getExternalFilesDir(null) ?: return emptyList()
++        return dir.listFiles { f -> f.isFile && f.name.endsWith(".srt", ignoreCase = true) }
++            ?.sortedBy { it.name.lowercase() } ?: emptyList()
++    }
++
++    private fun pickSubtitle() {
++        val local = localSrtFiles()
++        if (isTv && local.isNotEmpty()) {
++            showLocalSrtDialog(local)
++            return
++        }
++        try {
++            pickSrtLauncher.launch(arrayOf("application/x-subrip", "text/plain", "*/*"))
++        } catch (_: ActivityNotFoundException) {
++            if (local.isNotEmpty()) showLocalSrtDialog(local)
++            else showAdbHelp(getString(R.string.tv_no_picker_help, getExternalFilesDir(null)?.absolutePath ?: ""))
++        }
++    }
++
++    private fun showLocalSrtDialog(files: List<java.io.File>) {
++        androidx.appcompat.app.AlertDialog.Builder(this)
++            .setTitle(R.string.pick_srt)
++            .setItems(files.map { it.name }.toTypedArray()) { _, i -> loadSrt(Uri.fromFile(files[i])) }
++            .setNegativeButton(R.string.a11y_disc_cancel) { d, _ -> d.dismiss() }
++            .show()
++    }
++
++    private fun requestOverlayPermission() {
++        try {
++            startActivity(
++                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
++            )
++            Toast.makeText(this, getString(R.string.perm_hint), Toast.LENGTH_LONG).show()
++        } catch (_: Exception) {
++            showAdbHelp(getString(R.string.tv_overlay_help))
++        }
++    }
++
++    private fun showAdbHelp(message: String) {
++        androidx.appcompat.app.AlertDialog.Builder(this)
++            .setMessage(message)
++            .setPositiveButton(android.R.string.ok) { d, _ -> d.dismiss() }
++            .show()
++    }
++
++    private fun tvFocus(v: View) {
++        v.setOnFocusChangeListener { view, hasFocus ->
++            view.animate().scaleX(if (hasFocus) 1.04f else 1f)
++                .scaleY(if (hasFocus) 1.04f else 1f).setDuration(120).start()
++        }
++    }
++
+     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+ 
+     private fun requestNotifIfNeeded() {
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
+index cb993dd..89ba6e5 100644
+--- a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
+@@ -4,14 +4,25 @@ import android.accessibilityservice.AccessibilityService
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.SystemClock
++import android.util.Log
++import android.view.KeyEvent
+ import android.view.accessibility.AccessibilityEvent
+ import android.view.accessibility.AccessibilityNodeInfo
+ import com.cybertkr.suboverlay.overlay.OverlayService
+ 
+ class SubtitleSyncService : AccessibilityService() {
+ 
++    private companion object {
++        const val TAG = "SublySync"
++        // Netflix on phones/tablets and Netflix on Android TV (e.g. NVIDIA Shield)
++        val NETFLIX_PACKAGES = setOf("com.netflix.mediaclient", "com.netflix.ninja")
++        const val DOUBLE_PRESS_MS = 700L
++    }
++
+     private val handler = Handler(Looper.getMainLooper())
+     private var lastRead = 0L
++    private var lastDump = 0L
++    private var lastPlayPauseDown = 0L
+     private val poll = object : Runnable {
+         override fun run() {
+             readOnce()
+@@ -25,7 +36,8 @@ class SubtitleSyncService : AccessibilityService() {
+     }
+ 
+     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+-        if (event?.packageName == "com.netflix.mediaclient") readOnce()
++        val pkg = event?.packageName?.toString() ?: return
++        if (pkg in NETFLIX_PACKAGES) readOnce()
+     }
+ 
+     override fun onInterrupt() {}
+@@ -35,14 +47,67 @@ class SubtitleSyncService : AccessibilityService() {
+         super.onDestroy()
+     }
+ 
++    /**
++     * Remote control support (Android TV / NVIDIA Shield, no touch screen).
++     *
++     * Press Play/Pause twice quickly while watching -> "sync adjust" mode for a few seconds.
++     * In that mode: Left/Right = -/+ 0.1 s, Up/Down = +/- 1 s, OK/Back = leave the mode.
++     * Outside of that mode every key is passed through to Netflix untouched.
++     */
++    override fun onKeyEvent(event: KeyEvent): Boolean {
++        if (!OverlayService.isActive() || !OverlayService.netflixSeenRecently()) return false
++        val code = event.keyCode
++        val down = event.action == KeyEvent.ACTION_DOWN
++
++        if (OverlayService.isAdjusting()) {
++            val delta: Long? = when (code) {
++                KeyEvent.KEYCODE_DPAD_LEFT -> -100L
++                KeyEvent.KEYCODE_DPAD_RIGHT -> 100L
++                KeyEvent.KEYCODE_DPAD_UP -> 1000L
++                KeyEvent.KEYCODE_DPAD_DOWN -> -1000L
++                else -> null
++            }
++            if (delta != null) {
++                if (down) OverlayService.remoteNudge(delta)
++                return true
++            }
++            if (code == KeyEvent.KEYCODE_DPAD_CENTER ||
++                code == KeyEvent.KEYCODE_ENTER ||
++                code == KeyEvent.KEYCODE_BACK
++            ) {
++                if (down) OverlayService.exitAdjust()
++                return true
++            }
++        }
++
++        val isPlayPause = code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
++            code == KeyEvent.KEYCODE_MEDIA_PLAY ||
++            code == KeyEvent.KEYCODE_MEDIA_PAUSE
++        if (isPlayPause && down && event.repeatCount == 0) {
++            val now = SystemClock.elapsedRealtime()
++            if (now - lastPlayPauseDown < DOUBLE_PRESS_MS) {
++                lastPlayPauseDown = 0L
++                OverlayService.toggleAdjust()
++            } else {
++                lastPlayPauseDown = now
++            }
++        }
++        return false
++    }
++
+     private fun readOnce() {
+         val nowUp = SystemClock.uptimeMillis()
+         if (nowUp - lastRead < 120L) return
+         lastRead = nowUp
+         val root = rootInActiveWindow ?: return
+-        if (root.packageName != "com.netflix.mediaclient") return
++        val rootPkg = root.packageName?.toString() ?: return
++        if (rootPkg !in NETFLIX_PACKAGES) return
+         OverlayService.markNetflixForeground()
+-        val sb = findByTag(root, "seekbar") ?: return
++        val sb = findByTag(root, "seekbar") ?: findRangeNode(root)
++        if (sb == null) {
++            dumpTreeThrottled(root)
++            return
++        }
+         val ri = sb.rangeInfo ?: return
+         val posMs = ri.current.toLong()
+         val totalMs = ri.max.toLong()
+@@ -58,4 +123,41 @@ class SubtitleSyncService : AccessibilityService() {
+         }
+         return null
+     }
++
++    // Fallback for players whose seek bar has a different id: any node with a
++    // millisecond-sized range (> 1 minute) is treated as the seek bar.
++    private fun findRangeNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
++        val ri = node.rangeInfo
++        if (ri != null && ri.max >= 60_000f) return node
++        for (i in 0 until node.childCount) {
++            val c = node.getChild(i) ?: continue
++            findRangeNode(c)?.let { return it }
++        }
++        return null
++    }
++
++    // Debug helper: `adb logcat -s SublySync` shows what the player exposes.
++    private fun dumpTreeThrottled(root: AccessibilityNodeInfo) {
++        val now = SystemClock.elapsedRealtime()
++        if (now - lastDump < 8000L) return
++        lastDump = now
++        Log.d(TAG, "No seek bar found. Tree of ${root.packageName}:")
++        var budget = 80
++        fun walk(n: AccessibilityNodeInfo, depth: Int) {
++            if (budget <= 0) return
++            budget--
++            val ri = n.rangeInfo
++            Log.d(
++                TAG,
++                "  ".repeat(depth) + "${n.className} id=${n.viewIdResourceName} " +
++                    "text=${n.text} desc=${n.contentDescription} " +
++                    (if (ri != null) "range=${ri.current}/${ri.max}" else "")
++            )
++            for (i in 0 until n.childCount) {
++                val c = n.getChild(i) ?: continue
++                walk(c, depth + 1)
++            }
++        }
++        walk(root, 0)
++    }
+ }
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
+index b555f02..aebd606 100644
+--- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
+@@ -40,6 +40,37 @@ class OverlayService : LifecycleService() {
+             instance?.lastNetflixSeen = android.os.SystemClock.elapsedRealtime()
+         }
+ 
++        fun isActive(): Boolean = instance != null
++
++        fun netflixSeenRecently(): Boolean {
++            val s = instance ?: return false
++            return android.os.SystemClock.elapsedRealtime() - s.lastNetflixSeen < 5000L
++        }
++
++        // --- Remote-control ("adjust") mode for TVs without touch ---
++        fun isAdjusting(): Boolean {
++            val s = instance ?: return false
++            return android.os.SystemClock.elapsedRealtime() < s.adjustUntil
++        }
++
++        fun toggleAdjust() {
++            val s = instance ?: return
++            val now = android.os.SystemClock.elapsedRealtime()
++            s.adjustUntil = if (now < s.adjustUntil) 0L else now + ADJUST_TIMEOUT_MS
++        }
++
++        fun exitAdjust() {
++            instance?.adjustUntil = 0L
++        }
++
++        fun remoteNudge(deltaMs: Long) {
++            val s = instance ?: return
++            s.applyNudge(deltaMs)
++            s.adjustUntil = android.os.SystemClock.elapsedRealtime() + ADJUST_TIMEOUT_MS
++        }
++
++        private const val ADJUST_TIMEOUT_MS = 6000L
++
+         fun bridgePosition(posMs: Long, totalMs: Long) {
+             val s = instance ?: return
+             if (totalMs > 0L) s.totalMs = totalMs
+@@ -60,6 +91,7 @@ class OverlayService : LifecycleService() {
+     private var totalMs: Long = 0L
+     private var autoSynced = false
+     @Volatile private var lastNetflixSeen = 0L
++    @Volatile private var adjustUntil = 0L
+     private var userOffsetMs = 0L
+     private val settings by lazy { com.cybertkr.suboverlay.SettingsStore(this) }
+ 
+@@ -72,7 +104,12 @@ class OverlayService : LifecycleService() {
+             val now = SystemClock.elapsedRealtime()
+             val pos = clock.position(now)
+             val hidden = now - lastNetflixSeen >= 3000L
+-            subtitleView.setLine(if (hidden) null else engine.cueAt(pos)?.text)
++            val line = when {
++                now < adjustUntil -> adjustHud()
++                hidden -> null
++                else -> engine.cueAt(pos)?.text
++            }
++            subtitleView.setLine(line)
+             if (this@OverlayService::bubble.isInitialized) {
+                 bubble.updateTime(pos.coerceIn(0, totalMs), totalMs)
+             }
+@@ -109,18 +146,25 @@ class OverlayService : LifecycleService() {
+         ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = 160 }
+ 
+         bubble = ControlBubble(this, wm, bubbleParams, object : ControlBubble.Callbacks {
+-            override fun onNudge(deltaMs: Long) {
+-                val now = android.os.SystemClock.elapsedRealtime()
+-                userOffsetMs += deltaMs
+-                clock.nudge(deltaMs, now)
+-                val t = com.cybertkr.suboverlay.SubtitleRepository.title
+-                if (t != null) lifecycleScope.launch { settings.setOffset(t, userOffsetMs) }
+-            }
++            override fun onNudge(deltaMs: Long) { applyNudge(deltaMs) }
+             override fun onClose() { stopSelf() }
+         })
+         wm.addView(bubble.view(), bubbleParams)
+     }
+ 
++    private fun applyNudge(deltaMs: Long) {
++        val now = android.os.SystemClock.elapsedRealtime()
++        userOffsetMs += deltaMs
++        clock.nudge(deltaMs, now)
++        val t = com.cybertkr.suboverlay.SubtitleRepository.title
++        if (t != null) lifecycleScope.launch { settings.setOffset(t, userOffsetMs) }
++    }
++
++    private fun adjustHud(): String {
++        val secs = String.format(java.util.Locale.US, "%+.1f", userOffsetMs / 1000.0)
++        return "◀ later    Sync $secs s    earlier ▶\n▲ +1 s   ▼ −1 s   OK = done"
++    }
++
+     private fun addSubtitleWindow() {
+         subtitleView = SubtitleView(this)
+         val subtitleParams = WindowManager.LayoutParams(
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
+index 5859591..f6d27e9 100644
+--- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
+@@ -8,7 +8,8 @@ import android.widget.TextView
+ class SubtitleView(context: Context) : TextView(context) {
+     init {
+         setTextColor(Color.WHITE)
+-        textSize = 20f
++        val tv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
++        textSize = if (tv) 30f else 20f
+         gravity = Gravity.CENTER
+         setPadding(24, 12, 24, 12)
+         setShadowLayer(6f, 0f, 0f, Color.BLACK)
+diff --git a/app/src/main/res/drawable/banner.xml b/app/src/main/res/drawable/banner.xml
+new file mode 100644
+index 0000000..69c31e6
+--- /dev/null
++++ b/app/src/main/res/drawable/banner.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item>
++        <shape android:shape="rectangle">
++            <gradient android:type="linear" android:angle="45"
++                android:startColor="#2E7CF6" android:endColor="#14B8A6" />
++        </shape>
++    </item>
++    <item
++        android:width="72dp"
++        android:height="72dp"
++        android:gravity="center"
++        android:drawable="@drawable/ic_flow_fab" />
++</layer-list>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 99bc1d6..a32b985 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -28,4 +28,7 @@
+     <string name="opacity_pct">%d%%</string>
+     <string name="fade_never">Never hides</string>
+     <string name="fade_secs">%d s</string>
++    <string name="tv_a11y_help" translatable="false">This device has no Accessibility settings screen. Enable the service from a computer:\n\nadb shell settings put secure enabled_accessibility_services com.cybertkr.suboverlay/com.cybertkr.suboverlay.a11y.SubtitleSyncService\nadb shell settings put secure accessibility_enabled 1</string>
++    <string name="tv_overlay_help" translatable="false">This device has no overlay permission screen. Grant it from a computer:\n\nadb shell appops set com.cybertkr.suboverlay SYSTEM_ALERT_WINDOW allow</string>
++    <string name="tv_no_picker_help" translatable="false">This device has no file picker. Copy your .srt file into this folder from a computer, then tap Choose again:\n\n%1$s\n\nadb push file.srt %1$s/</string>
+ </resources>
+diff --git a/app/src/main/res/xml/a11y_config.xml b/app/src/main/res/xml/a11y_config.xml
+index b6f2384..9fbd46c 100644
+--- a/app/src/main/res/xml/a11y_config.xml
++++ b/app/src/main/res/xml/a11y_config.xml
+@@ -3,6 +3,8 @@
+     android:description="@string/a11y_desc"
+     android:accessibilityEventTypes="typeViewClicked|typeWindowContentChanged|typeWindowStateChanged"
+     android:accessibilityFeedbackType="feedbackGeneric"
++    android:accessibilityFlags="flagRequestFilterKeyEvents"
++    android:canRequestFilterKeyEvents="true"
+     android:canRetrieveWindowContent="true"
+-    android:packageNames="com.netflix.mediaclient"
++    android:packageNames="com.netflix.mediaclient,com.netflix.ninja"
+     android:notificationTimeout="100" />
