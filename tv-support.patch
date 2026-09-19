@@ -41,7 +41,7 @@ index a0cd127..a4b73a7 100644
              android:name=".a11y.SubtitleSyncService"
              android:label="@string/a11y_label"
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
-index 57ca1b1..d3faaa2 100644
+index 57ca1b1..03cd787 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
 @@ -1,6 +1,8 @@
@@ -53,17 +53,48 @@ index 57ca1b1..d3faaa2 100644
  import android.net.Uri
  import android.os.Build
  import android.os.Bundle
-@@ -35,20 +37,15 @@ class MainActivity : AppCompatActivity() {
+@@ -21,6 +23,17 @@ class MainActivity : AppCompatActivity() {
+     private lateinit var binding: ActivityMainBinding
+     private val settings by lazy { SettingsStore(this) }
+ 
++    private var encoding = "auto"
++    private var lastBytes: ByteArray? = null
++    private var lastName: String? = null
++    private val encodings = listOf(
++        "auto" to "Auto",
++        "UTF-8" to "UTF-8",
++        "windows-1250" to "Windows-1250 (srpski / hrvatski, latinica)",
++        "windows-1251" to "Windows-1251 (ćirilica)",
++        "windows-1254" to "Windows-1254 (turski)"
++    )
++
+     private val notifPermLauncher =
+         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+ 
+@@ -35,20 +48,29 @@ class MainActivity : AppCompatActivity() {
          binding = ActivityMainBinding.inflate(layoutInflater)
          setContentView(binding.root)
  
 -        binding.pickSrt.setOnClickListener {
 -            pickSrtLauncher.launch(arrayOf("application/x-subrip", "text/plain", "*/*"))
--        }
 +        binding.pickSrt.setOnClickListener { pickSubtitle() }
 +        tvFocus(binding.pickSrt)
 +        tvFocus(binding.startOverlay)
 +        tvFocus(binding.permBanner)
++        tvFocus(binding.encodingBtn)
++        tvFocus(binding.debugSwitch)
++        binding.encodingBtn.setOnClickListener { showEncodingDialog() }
++        lifecycleScope.launch {
++            encoding = settings.getEncoding()
++            renderEncoding()
++            val dbg = settings.getDebug()
++            binding.debugSwitch.isChecked = dbg
++            com.cybertkr.suboverlay.overlay.OverlayService.debugEnabled = dbg
++            binding.debugSwitch.setOnCheckedChangeListener { _, checked ->
++                com.cybertkr.suboverlay.overlay.OverlayService.debugEnabled = checked
++                lifecycleScope.launch { settings.setDebug(checked) }
++            }
+         }
  
          binding.startOverlay.setOnClickListener {
              requestNotifIfNeeded()
@@ -79,7 +110,7 @@ index 57ca1b1..d3faaa2 100644
                  return@setOnClickListener
              }
              startForegroundService(
-@@ -73,14 +70,7 @@ class MainActivity : AppCompatActivity() {
+@@ -73,14 +95,7 @@ class MainActivity : AppCompatActivity() {
              !overlayOk -> {
                  binding.permBanner.visibility = View.VISIBLE
                  binding.permBannerText.setText(R.string.perm_warn_overlay)
@@ -95,7 +126,7 @@ index 57ca1b1..d3faaa2 100644
              }
              !a11yOk -> {
                  binding.permBanner.visibility = View.VISIBLE
-@@ -112,7 +102,12 @@ class MainActivity : AppCompatActivity() {
+@@ -112,7 +127,12 @@ class MainActivity : AppCompatActivity() {
          try {
              startActivity(intent)
          } catch (_: Exception) {
@@ -109,7 +140,7 @@ index 57ca1b1..d3faaa2 100644
          }
          Toast.makeText(this, getString(R.string.perm_a11y_hint), Toast.LENGTH_LONG).show()
      }
-@@ -175,7 +170,7 @@ class MainActivity : AppCompatActivity() {
+@@ -175,7 +195,7 @@ class MainActivity : AppCompatActivity() {
      private fun loadSrt(uri: Uri) {
          try {
              contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -118,7 +149,63 @@ index 57ca1b1..d3faaa2 100644
          }
          val bytes = try {
              contentResolver.openInputStream(uri)?.use { it.readBytes() }
-@@ -248,8 +243,10 @@ class MainActivity : AppCompatActivity() {
+@@ -187,19 +207,51 @@ class MainActivity : AppCompatActivity() {
+             lifecycleScope.launch { settings.removeRecent(uri.toString()); renderRecent() }
+             return
+         }
+-        val raw = com.cybertkr.suboverlay.core.SrtText.decode(bytes)
+-        val result = com.cybertkr.suboverlay.core.SrtParser.parse(raw)
+         val name = displayName(uri)
++        lastBytes = bytes
++        lastName = name
++        publishSrt(bytes, name)
++        lifecycleScope.launch {
++            settings.addRecent(uri.toString(), name)
++            renderRecent()
++        }
++    }
++
++    private fun publishSrt(bytes: ByteArray, name: String) {
++        val raw = com.cybertkr.suboverlay.core.SrtText.decode(bytes, encoding)
++        val result = com.cybertkr.suboverlay.core.SrtParser.parse(raw)
+         SubtitleRepository.cues = result.cues
+         SubtitleRepository.title = name
+         binding.srtInfo.text = getString(R.string.srt_loaded, name, result.cues.size)
++        com.cybertkr.suboverlay.overlay.OverlayService.reloadCues()
+         lifecycleScope.launch {
+             SubtitleRepository.savedOffsetMs = settings.getOffset(name)
+-            settings.addRecent(uri.toString(), name)
+-            renderRecent()
+         }
+     }
+ 
++    private fun renderEncoding() {
++        val label = encodings.firstOrNull { it.first == encoding }?.second ?: "Auto"
++        binding.encodingBtn.text = getString(R.string.encoding_btn, label)
++    }
++
++    private fun showEncodingDialog() {
++        val labels = encodings.map { it.second }.toTypedArray()
++        val current = encodings.indexOfFirst { it.first == encoding }.coerceAtLeast(0)
++        androidx.appcompat.app.AlertDialog.Builder(this)
++            .setTitle(R.string.encoding_title)
++            .setSingleChoiceItems(labels, current) { dialog, which ->
++                encoding = encodings[which].first
++                lifecycleScope.launch { settings.setEncoding(encoding) }
++                renderEncoding()
++                val b = lastBytes
++                val n = lastName
++                if (b != null && n != null) publishSrt(b, n)
++                dialog.dismiss()
++            }
++            .setNegativeButton(R.string.a11y_disc_cancel) { d, _ -> d.dismiss() }
++            .show()
++    }
++
+     private fun displayName(uri: Uri): String {
+         try {
+             contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+@@ -248,8 +300,10 @@ class MainActivity : AppCompatActivity() {
                      isClickable = true
                      setBackgroundResource(R.drawable.btn_secondary)
                      setTextColor(0xFF2E7CF6.toInt())
@@ -129,7 +216,7 @@ index 57ca1b1..d3faaa2 100644
                  val lp = LinearLayout.LayoutParams(
                      LinearLayout.LayoutParams.MATCH_PARENT,
                      LinearLayout.LayoutParams.WRAP_CONTENT
-@@ -259,6 +256,62 @@ class MainActivity : AppCompatActivity() {
+@@ -259,6 +313,62 @@ class MainActivity : AppCompatActivity() {
          }
      }
  
@@ -207,8 +294,42 @@ index 0000000..e71db25
 + * player's media session (its playback position). Notifications themselves are never read or stored.
 + */
 +class MediaSyncListener : NotificationListenerService()
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/SettingsStore.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/SettingsStore.kt
+index b6beaac..bb8d0a0 100644
+--- a/app/src/main/kotlin/com/cybertkr/suboverlay/SettingsStore.kt
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/SettingsStore.kt
+@@ -1,6 +1,7 @@
+ package com.cybertkr.suboverlay
+ 
+ import android.content.Context
++import androidx.datastore.preferences.core.booleanPreferencesKey
+ import androidx.datastore.preferences.core.edit
+ import androidx.datastore.preferences.core.intPreferencesKey
+ import androidx.datastore.preferences.core.longPreferencesKey
+@@ -52,7 +53,21 @@ class SettingsStore(private val context: Context) {
+         context.dataStore.edit { it[FADE_SECS] = v.coerceIn(0, 20) }
+     }
+ 
++    suspend fun getDebug(): Boolean =
++        context.dataStore.data.first()[DEBUG] ?: false
++    suspend fun setDebug(v: Boolean) {
++        context.dataStore.edit { it[DEBUG] = v }
++    }
++
++    suspend fun getEncoding(): String =
++        context.dataStore.data.first()[ENCODING] ?: "auto"
++    suspend fun setEncoding(v: String) {
++        context.dataStore.edit { it[ENCODING] = v }
++    }
++
+     private companion object {
++        val DEBUG = booleanPreferencesKey("debug_info")
++        val ENCODING = stringPreferencesKey("srt_encoding")
+         val RECENT = stringPreferencesKey("recent_srts")
+         val IDLE_ALPHA = intPreferencesKey("bubble_idle_alpha")
+         val FADE_SECS = intPreferencesKey("bubble_fade_secs")
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
-index cb993dd..7a8a580 100644
+index cb993dd..f729bff 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
 @@ -1,17 +1,29 @@
@@ -262,16 +383,16 @@ index cb993dd..7a8a580 100644
      }
  
      override fun onInterrupt() {}
-@@ -35,17 +54,99 @@ class SubtitleSyncService : AccessibilityService() {
+@@ -35,17 +54,80 @@ class SubtitleSyncService : AccessibilityService() {
          super.onDestroy()
      }
  
 +    /**
 +     * Remote control support (Android TV / NVIDIA Shield, no touch screen).
 +     *
-+     * Press Play/Pause twice quickly while watching -> "sync adjust" mode for a few seconds.
-+     * In that mode: Left/Right = -/+ 0.1 s, Up/Down = +/- 1 s, OK/Back = leave the mode.
-+     * Outside of that mode every key is passed through to Netflix untouched.
++     * Press Play/Pause twice quickly while watching -> the Subly+ menu opens at the top.
++     * While the menu is open the D-pad and OK/Back drive it; every other key (including a single
++     * Play/Pause) still goes to Netflix untouched.
 +     */
 +    override fun onKeyEvent(event: KeyEvent): Boolean {
 +        val code = event.keyCode
@@ -279,26 +400,7 @@ index cb993dd..7a8a580 100644
 +        if (down) OverlayService.dbgKey = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
 +        if (!OverlayService.isActive() || !OverlayService.netflixSeenRecently()) return false
 +
-+        if (OverlayService.isAdjusting()) {
-+            val delta: Long? = when (code) {
-+                KeyEvent.KEYCODE_DPAD_LEFT -> -100L
-+                KeyEvent.KEYCODE_DPAD_RIGHT -> 100L
-+                KeyEvent.KEYCODE_DPAD_UP -> 1000L
-+                KeyEvent.KEYCODE_DPAD_DOWN -> -1000L
-+                else -> null
-+            }
-+            if (delta != null) {
-+                if (down) OverlayService.remoteNudge(delta)
-+                return true
-+            }
-+            if (code == KeyEvent.KEYCODE_DPAD_CENTER ||
-+                code == KeyEvent.KEYCODE_ENTER ||
-+                code == KeyEvent.KEYCODE_BACK
-+            ) {
-+                if (down) OverlayService.exitAdjust()
-+                return true
-+            }
-+        }
++        if (OverlayService.isMenuOpen() && OverlayService.handleMenuKey(code, down)) return true
 +
 +        val isPlayPause = code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
 +            code == KeyEvent.KEYCODE_MEDIA_PLAY ||
@@ -307,7 +409,7 @@ index cb993dd..7a8a580 100644
 +            val now = SystemClock.elapsedRealtime()
 +            if (now - lastPlayPauseDown < DOUBLE_PRESS_MS) {
 +                lastPlayPauseDown = 0L
-+                OverlayService.toggleAdjust()
++                OverlayService.toggleMenu()
 +            } else {
 +                lastPlayPauseDown = now
 +            }
@@ -366,7 +468,7 @@ index cb993dd..7a8a580 100644
          if (posMs < 0 || totalMs <= 0) return
          OverlayService.bridgePosition(posMs, totalMs)
      }
-@@ -58,4 +159,41 @@ class SubtitleSyncService : AccessibilityService() {
+@@ -58,4 +140,41 @@ class SubtitleSyncService : AccessibilityService() {
          }
          return null
      }
@@ -408,91 +510,292 @@ index cb993dd..7a8a580 100644
 +        walk(root, 0)
 +    }
  }
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/MenuBar.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/MenuBar.kt
+new file mode 100644
+index 0000000..837b21b
+--- /dev/null
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/MenuBar.kt
+@@ -0,0 +1,160 @@
++package com.cybertkr.suboverlay.overlay
++
++import android.content.Context
++import android.content.pm.PackageManager
++import android.graphics.Color
++import android.graphics.Typeface
++import android.graphics.drawable.GradientDrawable
++import android.view.Gravity
++import android.view.View
++import android.widget.ImageView
++import android.widget.LinearLayout
++import android.widget.TextView
++import com.cybertkr.suboverlay.R
++import java.util.Locale
++
++/**
++ * Small pill-shaped menu drawn at the top of the screen (Stremio-like).
++ * Row 1: three icons (subtitles / sync / settings).
++ * Row 2 (optional): the sync controls, or the list of recent subtitles.
++ * It is display-only; keys are handled in OverlayService.
++ */
++class MenuBar(private val context: Context) {
++
++    private val density = context.resources.displayMetrics.density
++    private fun px(v: Float) = (v * density).toInt()
++
++    private val tv = context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
++    private val textSp = if (tv) 18f else 14f
++
++    private val accentStart = Color.parseColor("#2E7CF6")
++    private val accentEnd = Color.parseColor("#14B8A6")
++
++    private val card = LinearLayout(context).apply {
++        orientation = LinearLayout.VERTICAL
++        gravity = Gravity.CENTER_HORIZONTAL
++        setPadding(px(14f), px(10f), px(14f), px(12f))
++        background = GradientDrawable().apply {
++            setColor(Color.parseColor("#E60F1419"))
++            cornerRadius = px(22f).toFloat()
++        }
++        visibility = View.GONE
++    }
++
++    fun view(): View = card
++
++    /** mode: 0 = icons only, 1 = sync row, 2 = recent subtitles list */
++    fun render(mode: Int, selected: Int, offsetMs: Long, list: List<String>, listSel: Int) {
++        card.removeAllViews()
++        card.addView(iconRow(selected))
++        when (mode) {
++            1 -> card.addView(syncRow(offsetMs), lp(top = 10f))
++            2 -> card.addView(listBlock(list, listSel), lp(top = 10f))
++            else -> {}
++        }
++    }
++
++    private fun lp(top: Float = 0f, start: Float = 0f): LinearLayout.LayoutParams =
++        LinearLayout.LayoutParams(
++            LinearLayout.LayoutParams.WRAP_CONTENT,
++            LinearLayout.LayoutParams.WRAP_CONTENT
++        ).apply { topMargin = px(top); marginStart = px(start) }
++
++    private fun chipBackground(active: Boolean): GradientDrawable =
++        if (active) {
++            GradientDrawable(
++                GradientDrawable.Orientation.LEFT_RIGHT,
++                intArrayOf(accentStart, accentEnd)
++            ).apply { cornerRadius = px(16f).toFloat() }
++        } else {
++            GradientDrawable().apply {
++                setColor(Color.parseColor("#26FFFFFF"))
++                cornerRadius = px(16f).toFloat()
++            }
++        }
++
++    private fun iconRow(selected: Int): View {
++        val row = LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER
++        }
++        val items = listOf(
++            R.drawable.ic_menu_download to "Titl",
++            R.drawable.ic_menu_sync to "Sync",
++            R.drawable.ic_menu_settings to "Postavke"
++        )
++        items.forEachIndexed { i, (icon, label) ->
++            val chip = LinearLayout(context).apply {
++                orientation = LinearLayout.HORIZONTAL
++                gravity = Gravity.CENTER_VERTICAL
++                setPadding(px(14f), px(8f), px(16f), px(8f))
++                background = chipBackground(i == selected)
++            }
++            val iv = ImageView(context).apply {
++                setImageResource(icon)
++                setColorFilter(Color.WHITE)
++            }
++            chip.addView(iv, LinearLayout.LayoutParams(px(if (tv) 26f else 22f), px(if (tv) 26f else 22f)))
++            val tvLabel = TextView(context).apply {
++                text = label
++                textSize = textSp
++                setTextColor(Color.WHITE)
++                setTypeface(typeface, if (i == selected) Typeface.BOLD else Typeface.NORMAL)
++                setPadding(px(8f), 0, 0, 0)
++            }
++            chip.addView(tvLabel)
++            row.addView(chip, lp(start = if (i == 0) 0f else 8f))
++        }
++        return row
++    }
++
++    private fun keyChip(text: String, bold: Boolean = false, highlight: Boolean = false): TextView =
++        TextView(context).apply {
++            this.text = text
++            textSize = textSp
++            setTextColor(Color.WHITE)
++            setTypeface(typeface, if (bold) Typeface.BOLD else Typeface.NORMAL)
++            setPadding(px(12f), px(7f), px(12f), px(7f))
++            background = chipBackground(highlight)
++        }
++
++    private fun fmtOffset(ms: Long): String =
++        String.format(Locale.US, "%+.1f", ms / 1000.0).replace('.', ',') + " s"
++
++    private fun syncRow(offsetMs: Long): View {
++        val row = LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER
++        }
++        val parts = listOf(
++            keyChip("↓ −1 s"),
++            keyChip("← −0,1 s"),
++            keyChip("Sync " + fmtOffset(offsetMs), bold = true, highlight = true),
++            keyChip("+0,1 s →"),
++            keyChip("+1 s ↑"),
++            keyChip("OK  Reset")
++        )
++        parts.forEachIndexed { i, v -> row.addView(v, lp(start = if (i == 0) 0f else 6f)) }
++        return row
++    }
++
++    private fun listBlock(list: List<String>, sel: Int): View {
++        val col = LinearLayout(context).apply {
++            orientation = LinearLayout.VERTICAL
++            gravity = Gravity.CENTER_HORIZONTAL
++        }
++        if (list.isEmpty()) {
++            col.addView(keyChip("Nema titlova — dodaj ih u Subly+ (Postavke)"))
++            return col
++        }
++        list.take(5).forEachIndexed { i, name ->
++            val t = keyChip(name, bold = i == sel, highlight = i == sel).apply {
++                maxLines = 1
++                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
++                maxWidth = px(if (tv) 520f else 320f)
++            }
++            col.addView(t, lp(top = if (i == 0) 0f else 6f))
++        }
++        return col
++    }
++}
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-index b555f02..be7b1c5 100644
+index b555f02..6d8e85b 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-@@ -3,10 +3,14 @@ package com.cybertkr.suboverlay.overlay
+@@ -3,25 +3,39 @@ package com.cybertkr.suboverlay.overlay
  import android.app.NotificationChannel
  import android.app.NotificationManager
  import android.app.PendingIntent
 +import android.content.ComponentName
  import android.content.Context
  import android.content.Intent
++import android.content.pm.PackageManager
  import android.content.pm.ServiceInfo
  import android.graphics.PixelFormat
 +import android.media.MediaMetadata
 +import android.media.session.MediaSessionManager
 +import android.media.session.PlaybackState
++import android.net.Uri
  import android.os.Build
  import android.os.Handler
  import android.os.IBinder
-@@ -19,6 +23,7 @@ import androidx.lifecycle.LifecycleService
+ import android.os.Looper
+ import android.os.SystemClock
+ import android.view.Gravity
++import android.view.KeyEvent
++import android.view.View
+ import android.view.WindowManager
++import android.widget.Toast
+ import androidx.core.app.NotificationCompat
+ import androidx.lifecycle.LifecycleService
  import androidx.lifecycle.lifecycleScope
++import kotlinx.coroutines.Dispatchers
  import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
  import com.cybertkr.suboverlay.MainActivity
 +import com.cybertkr.suboverlay.MediaSyncListener
  import com.cybertkr.suboverlay.R
  import com.cybertkr.suboverlay.SubtitleRepository
  import com.cybertkr.suboverlay.core.PlaybackClock
-@@ -40,10 +45,51 @@ class OverlayService : LifecycleService() {
-             instance?.lastNetflixSeen = android.os.SystemClock.elapsedRealtime()
-         }
++import com.cybertkr.suboverlay.core.SrtParser
++import com.cybertkr.suboverlay.core.SrtText
+ import com.cybertkr.suboverlay.core.TimelineEngine
  
-+        fun isActive(): Boolean = instance != null
-+
-+        // Debug status shown on screen until the first sync (helps on TVs without a computer at hand)
+ class OverlayService : LifecycleService() {
+@@ -29,6 +43,18 @@ class OverlayService : LifecycleService() {
+     companion object {
+         @Volatile private var instance: OverlayService? = null
+ 
++        // Debug status (shown on screen only when the "Debug info" switch is on)
++        @Volatile var debugEnabled = false
 +        @Volatile var a11yConnected = false
 +        @Volatile var dbgWin = "-"
 +        @Volatile var dbgBar = "-"
 +        @Volatile var dbgKey = "-"
 +        @Volatile var dbgMs = "-"
++        @Volatile var dbgMeta = "-"
++
 +        private val NETFLIX_PKGS = setOf("com.netflix.mediaclient", "com.netflix.ninja")
++        private const val MENU_TIMEOUT_MS = 8000L
++
+         fun applyLiveConfig(alphaPercent: Int, fadeSeconds: Int) {
+             val s = instance ?: return
+             s.mainHandler.post {
+@@ -36,14 +62,41 @@ class OverlayService : LifecycleService() {
+             }
+         }
+ 
++        /** Called by the UI when a new subtitle file was loaded or re-decoded. */
++        fun reloadCues() {
++            val s = instance ?: return
++            s.mainHandler.post { s.engine = TimelineEngine(SubtitleRepository.cues) }
++        }
++
+         fun markNetflixForeground() {
+-            instance?.lastNetflixSeen = android.os.SystemClock.elapsedRealtime()
++            instance?.lastNetflixSeen = SystemClock.elapsedRealtime()
+         }
+ 
++        fun isActive(): Boolean = instance != null
 +
 +        fun netflixSeenRecently(): Boolean {
 +            val s = instance ?: return false
-+            return android.os.SystemClock.elapsedRealtime() - s.lastNetflixSeen < 5000L
++            return SystemClock.elapsedRealtime() - s.lastNetflixSeen < 5000L
 +        }
 +
-+        // --- Remote-control ("adjust") mode for TVs without touch ---
-+        fun isAdjusting(): Boolean {
-+            val s = instance ?: return false
-+            return android.os.SystemClock.elapsedRealtime() < s.adjustUntil
-+        }
++        // ---- On-screen menu (opened by pressing Play/Pause twice, used with the remote) ----
++        fun isMenuOpen(): Boolean = instance?.menuOpen == true
 +
-+        fun toggleAdjust() {
++        fun toggleMenu() {
 +            val s = instance ?: return
-+            val now = android.os.SystemClock.elapsedRealtime()
-+            s.adjustUntil = if (now < s.adjustUntil) 0L else now + ADJUST_TIMEOUT_MS
++            if (s.menuOpen) s.closeMenu() else s.openMenu()
 +        }
 +
-+        fun exitAdjust() {
-+            instance?.adjustUntil = 0L
-+        }
-+
-+        fun remoteNudge(deltaMs: Long) {
-+            val s = instance ?: return
-+            s.applyNudge(deltaMs)
-+            s.adjustUntil = android.os.SystemClock.elapsedRealtime() + ADJUST_TIMEOUT_MS
-+        }
-+
-+        private const val ADJUST_TIMEOUT_MS = 6000L
++        /** Returns true if the key was consumed by the menu. */
++        fun handleMenuKey(code: Int, down: Boolean): Boolean =
++            instance?.menuKey(code, down) ?: false
 +
          fun bridgePosition(posMs: Long, totalMs: Long) {
              val s = instance ?: return
--            if (totalMs > 0L) s.totalMs = totalMs
-             val now = android.os.SystemClock.elapsedRealtime()
++            val now = SystemClock.elapsedRealtime()
 +            // When the media session provides the position, it wins over the accessibility seek bar.
 +            if (now - s.lastMediaSync < 3000L) return
-+            if (totalMs > 0L) s.totalMs = totalMs
+             if (totalMs > 0L) s.totalMs = totalMs
+-            val now = android.os.SystemClock.elapsedRealtime()
              val target = posMs + s.userOffsetMs
              if (!s.autoSynced) {
                  s.clock.start(now, target)
-@@ -60,6 +106,11 @@ class OverlayService : LifecycleService() {
+@@ -54,44 +107,83 @@ class OverlayService : LifecycleService() {
+         }
+     }
+ 
++    private enum class MenuMode { ICONS, SYNC, LIST }
++
+     private lateinit var wm: WindowManager
+     private lateinit var subtitleView: SubtitleView
+     private lateinit var bubble: ControlBubble
++    private lateinit var menu: MenuBar
      private var totalMs: Long = 0L
      private var autoSynced = false
      @Volatile private var lastNetflixSeen = 0L
-+    @Volatile private var adjustUntil = 0L
 +    @Volatile private var lastMediaSync = 0L
 +    private var lastMediaStamp = -1L
 +    private var lastMediaState = -1
@@ -500,22 +803,39 @@ index b555f02..be7b1c5 100644
      private var userOffsetMs = 0L
      private val settings by lazy { com.cybertkr.suboverlay.SettingsStore(this) }
  
-@@ -72,7 +123,13 @@ class OverlayService : LifecycleService() {
++    private var menuOpen = false
++    private var menuMode = MenuMode.ICONS
++    private var menuSel = 1
++    private var menuUntil = 0L
++    private var recents: List<Pair<String, String>> = emptyList()
++    private var listSel = 0
++
+     val clock = PlaybackClock()
+     private var engine = TimelineEngine(emptyList())
+     private val mainHandler = Handler(Looper.getMainLooper())
+     private val ticker = Handler(Looper.getMainLooper())
++
++    private val isTv: Boolean
++        get() = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
++
+     private val tickRunnable = object : Runnable {
+         override fun run() {
              val now = SystemClock.elapsedRealtime()
              val pos = clock.position(now)
              val hidden = now - lastNetflixSeen >= 3000L
 -            subtitleView.setLine(if (hidden) null else engine.cueAt(pos)?.text)
-+            val line = when {
-+                now < adjustUntil -> adjustHud()
-+                !autoSynced -> debugHud(hidden)
-+                hidden -> null
-+                else -> engine.cueAt(pos)?.text
++            val cue = if (hidden) null else engine.cueAt(pos)?.text
++            val line = if (debugEnabled) {
++                listOfNotNull(cue, debugHud(hidden)).joinToString("\n\n")
++            } else {
++                cue
 +            }
 +            subtitleView.setLine(line)
              if (this@OverlayService::bubble.isInitialized) {
                  bubble.updateTime(pos.coerceIn(0, totalMs), totalMs)
              }
-@@ -80,6 +137,17 @@ class OverlayService : LifecycleService() {
++            if (menuOpen && now > menuUntil) closeMenu()
+             ticker.postDelayed(this, 30)
          }
      }
  
@@ -533,15 +853,24 @@ index b555f02..be7b1c5 100644
      override fun onCreate() {
          super.onCreate()
          instance = this
-@@ -90,6 +158,7 @@ class OverlayService : LifecycleService() {
+-        userOffsetMs = com.cybertkr.suboverlay.SubtitleRepository.savedOffsetMs
++        userOffsetMs = SubtitleRepository.savedOffsetMs
+         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+         startAsForeground()
+         addSubtitleWindow()
++        addMenuWindow()
          engine = TimelineEngine(SubtitleRepository.cues)
          totalMs = SubtitleRepository.cues.maxOfOrNull { it.endMs } ?: 0L
          ticker.post(tickRunnable)
+-        addBubble()
 +        mainHandler.post(mediaPoll)
-         addBubble()
++        if (!isTv) addBubble()
          lifecycleScope.launch {
++            debugEnabled = settings.getDebug()
              val alpha = settings.getIdleAlphaPercent()
-@@ -109,18 +178,81 @@ class OverlayService : LifecycleService() {
+             val secs = settings.getFadeSeconds()
+             if (this@OverlayService::bubble.isInitialized) bubble.applyIdleConfig(alpha, secs)
+@@ -109,18 +201,225 @@ class OverlayService : LifecycleService() {
          ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = 160 }
  
          bubble = ControlBubble(this, wm, bubbleParams, object : ControlBubble.Callbacks {
@@ -558,18 +887,159 @@ index b555f02..be7b1c5 100644
          wm.addView(bubble.view(), bubbleParams)
      }
  
++    private fun addMenuWindow() {
++        menu = MenuBar(this)
++        val params = WindowManager.LayoutParams(
++            WindowManager.LayoutParams.WRAP_CONTENT,
++            WindowManager.LayoutParams.WRAP_CONTENT,
++            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
++            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
++                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
++                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
++                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
++            PixelFormat.TRANSLUCENT
++        ).apply {
++            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
++            y = (resources.displayMetrics.density * 24f).toInt()
++        }
++        wm.addView(menu.view(), params)
++    }
++
 +    private fun applyNudge(deltaMs: Long) {
-+        val now = android.os.SystemClock.elapsedRealtime()
++        val now = SystemClock.elapsedRealtime()
 +        userOffsetMs += deltaMs
 +        clock.nudge(deltaMs, now)
-+        val t = com.cybertkr.suboverlay.SubtitleRepository.title
++        val t = SubtitleRepository.title
 +        if (t != null) lifecycleScope.launch { settings.setOffset(t, userOffsetMs) }
 +    }
 +
++    // ------------------------------------------------------------------ menu
++
++    private fun openMenu() {
++        if (!this::menu.isInitialized) return
++        menuOpen = true
++        menuMode = MenuMode.ICONS
++        menuSel = 1
++        menuUntil = SystemClock.elapsedRealtime() + MENU_TIMEOUT_MS
++        renderMenu()
++        menu.view().visibility = View.VISIBLE
++    }
++
++    private fun closeMenu() {
++        menuOpen = false
++        if (this::menu.isInitialized) menu.view().visibility = View.GONE
++    }
++
++    private fun renderMenu() {
++        if (!this::menu.isInitialized) return
++        menu.render(
++            mode = menuMode.ordinal,
++            selected = menuSel,
++            offsetMs = userOffsetMs,
++            list = recents.map { it.second },
++            listSel = listSel
++        )
++    }
++
++    private fun menuKey(code: Int, down: Boolean): Boolean {
++        if (!menuOpen) return false
++        val ours = code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT ||
++            code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN ||
++            code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER ||
++            code == KeyEvent.KEYCODE_BACK
++        if (!ours) return false
++        if (!down) return true
++        menuUntil = SystemClock.elapsedRealtime() + MENU_TIMEOUT_MS
++        val ok = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
++        when (menuMode) {
++            MenuMode.ICONS -> {
++                when {
++                    code == KeyEvent.KEYCODE_DPAD_LEFT -> menuSel = (menuSel + 2) % 3
++                    code == KeyEvent.KEYCODE_DPAD_RIGHT -> menuSel = (menuSel + 1) % 3
++                    ok -> activateIcon(menuSel)
++                    code == KeyEvent.KEYCODE_BACK -> closeMenu()
++                }
++            }
++            MenuMode.SYNC -> {
++                when {
++                    code == KeyEvent.KEYCODE_DPAD_LEFT -> applyNudge(-100L)
++                    code == KeyEvent.KEYCODE_DPAD_RIGHT -> applyNudge(100L)
++                    code == KeyEvent.KEYCODE_DPAD_UP -> applyNudge(1000L)
++                    code == KeyEvent.KEYCODE_DPAD_DOWN -> applyNudge(-1000L)
++                    ok -> applyNudge(-userOffsetMs)
++                    code == KeyEvent.KEYCODE_BACK -> menuMode = MenuMode.ICONS
++                }
++            }
++            MenuMode.LIST -> {
++                when {
++                    code == KeyEvent.KEYCODE_DPAD_UP -> listSel = maxOf(0, listSel - 1)
++                    code == KeyEvent.KEYCODE_DPAD_DOWN ->
++                        listSel = minOf(maxOf(0, recents.size - 1), listSel + 1)
++                    ok -> loadRecent(listSel)
++                    code == KeyEvent.KEYCODE_BACK -> menuMode = MenuMode.ICONS
++                }
++            }
++        }
++        renderMenu()
++        return true
++    }
++
++    private fun activateIcon(i: Int) {
++        when (i) {
++            0 -> {
++                menuMode = MenuMode.LIST
++                listSel = 0
++                lifecycleScope.launch {
++                    recents = settings.getRecent()
++                    renderMenu()
++                }
++            }
++            1 -> menuMode = MenuMode.SYNC
++            else -> {
++                closeMenu()
++                val intent = Intent(this, MainActivity::class.java)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                startActivity(intent)
++            }
++        }
++    }
++
++    private fun loadRecent(i: Int) {
++        val item = recents.getOrNull(i) ?: return
++        lifecycleScope.launch {
++            val enc = settings.getEncoding()
++            val bytes = withContext(Dispatchers.IO) {
++                try {
++                    contentResolver.openInputStream(Uri.parse(item.first))?.use { it.readBytes() }
++                } catch (_: Exception) {
++                    null
++                }
++            }
++            if (bytes == null) {
++                Toast.makeText(this@OverlayService, "Ne mogu otvoriti titl", Toast.LENGTH_SHORT).show()
++                return@launch
++            }
++            val result = SrtParser.parse(SrtText.decode(bytes, enc))
++            SubtitleRepository.cues = result.cues
++            SubtitleRepository.title = item.second
++            engine = TimelineEngine(result.cues)
++            val saved = settings.getOffset(item.second)
++            SubtitleRepository.savedOffsetMs = saved
++            val delta = saved - userOffsetMs
++            userOffsetMs = saved
++            clock.nudge(delta, SystemClock.elapsedRealtime())
++            closeMenu()
++            Toast.makeText(this@OverlayService, "Učitano: ${item.second}", Toast.LENGTH_SHORT).show()
++        }
++    }
++
++    // ----------------------------------------------------------------- debug
++
 +    private fun debugHud(hidden: Boolean): String =
-+        "Subly+ debug (disappears once synced)\n" +
++        "Subly+ debug\n" +
 +            "a11y=${if (a11yConnected) "ON" else "OFF"}  win=$dbgWin  bar=$dbgBar\n" +
 +            "media: $dbgMs\n" +
++            "meta: $dbgMeta\n" +
 +            "netflix=${if (hidden) "no" else "yes"}  lastKey=$dbgKey  cues=${SubtitleRepository.cues.size}"
 +
 +    // Position source for players (like Netflix on Android TV) that hide their seek bar from
@@ -597,7 +1067,13 @@ index b555f02..be7b1c5 100644
 +        val speed = if (st.playbackSpeed > 0f) st.playbackSpeed else 1f
 +        val stamp = st.lastPositionUpdateTime
 +        val pos = if (playing && stamp > 0L) st.position + ((now - stamp) * speed).toLong() else st.position
-+        val dur = nf.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
++        val md = nf.metadata
++        val dur = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
++        dbgMeta = "title=${md?.getString(MediaMetadata.METADATA_KEY_TITLE)} | " +
++            "disp=${md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)} | " +
++            "sub=${md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)} | " +
++            "album=${md?.getString(MediaMetadata.METADATA_KEY_ALBUM)} | " +
++            "artist=${md?.getString(MediaMetadata.METADATA_KEY_ARTIST)}"
 +        dbgMs = "state=${st.state} pos=${pos / 1000}s dur=${dur / 1000}s"
 +        if (st.position < 0L) { dbgMs += " (no position)"; return }
 +        lastMediaSync = now
@@ -622,22 +1098,21 @@ index b555f02..be7b1c5 100644
 +        else if (!playing && clock.isRunning) clock.pause(now)
 +    }
 +
-+    private fun adjustHud(): String {
-+        val secs = String.format(java.util.Locale.US, "%+.1f", userOffsetMs / 1000.0)
-+        return "◀ later    Sync $secs s    earlier ▶\n▲ +1 s   ▼ −1 s   OK = done"
-+    }
++    // --------------------------------------------------------------- windows
 +
      private fun addSubtitleWindow() {
          subtitleView = SubtitleView(this)
          val subtitleParams = WindowManager.LayoutParams(
-@@ -174,6 +306,7 @@ class OverlayService : LifecycleService() {
+@@ -174,7 +473,9 @@ class OverlayService : LifecycleService() {
  
      override fun onDestroy() {
          ticker.removeCallbacks(tickRunnable)
 +        mainHandler.removeCallbacks(mediaPoll)
          if (this::bubble.isInitialized) wm.removeView(bubble.view())
++        if (this::menu.isInitialized) wm.removeView(menu.view())
          if (this::subtitleView.isInitialized) wm.removeView(subtitleView)
          instance = null
+         super.onDestroy()
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
 index 5859591..f6d27e9 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
@@ -672,17 +1147,98 @@ index 0000000..69c31e6
 +        android:gravity="center"
 +        android:drawable="@drawable/ic_flow_fab" />
 +</layer-list>
+diff --git a/app/src/main/res/drawable/ic_menu_download.xml b/app/src/main/res/drawable/ic_menu_download.xml
+new file mode 100644
+index 0000000..b8d99d7
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_menu_download.xml
+@@ -0,0 +1,6 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FFFFFF"
++        android:pathData="M19,9h-4V3H9v6H5l7,7 7,-7zM5,18v2h14v-2H5z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_menu_settings.xml b/app/src/main/res/drawable/ic_menu_settings.xml
+new file mode 100644
+index 0000000..2f747a5
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_menu_settings.xml
+@@ -0,0 +1,6 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FFFFFF"
++        android:pathData="M3,17v2h6v-2H3zM3,5v2h10V5H3zM13,21v-2h8v-2h-8v-2h-2v6h2zM7,9v2H3v2h4v2h2V9H7zM21,13v-2H11v2h10zM15,9h2V7h4V5h-4V3h-2v6z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_menu_sync.xml b/app/src/main/res/drawable/ic_menu_sync.xml
+new file mode 100644
+index 0000000..889157f
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_menu_sync.xml
+@@ -0,0 +1,6 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FFFFFF"
++        android:pathData="M11.99,2C6.47,2 2,6.48 2,12s4.47,10 9.99,10C17.52,22 22,17.52 22,12S17.52,2 11.99,2zM12,20c-4.42,0 -8,-3.58 -8,-8s3.58,-8 8,-8 8,3.58 8,8 -3.58,8 -8,8zM12.5,7H11v6l5.25,3.15 0.75,-1.23 -4.5,-2.67z"/>
++</vector>
+diff --git a/app/src/main/res/layout/activity_main.xml b/app/src/main/res/layout/activity_main.xml
+index 575b823..73e7efb 100644
+--- a/app/src/main/res/layout/activity_main.xml
++++ b/app/src/main/res/layout/activity_main.xml
+@@ -108,6 +108,20 @@
+             android:textColor="?android:attr/textColorSecondary"
+             android:textSize="13sp" />
+ 
++        <Button
++            android:id="@+id/encodingBtn"
++            android:layout_width="match_parent"
++            android:layout_height="46dp"
++            android:layout_marginTop="10dp"
++            android:text="@string/encoding_btn"
++            android:textColor="#2E7CF6"
++            android:textSize="13sp"
++            android:textAllCaps="false"
++            android:background="@drawable/btn_secondary"
++            android:stateListAnimator="@null"
++            android:insetTop="0dp"
++            android:insetBottom="0dp" />
++
+         <TextView
+             android:id="@+id/recentLabel"
+             android:layout_width="match_parent"
+@@ -221,6 +235,16 @@
+             app:haloColor="#332E7CF6"
+             app:tickVisible="false" />
+ 
++        <com.google.android.material.switchmaterial.SwitchMaterial
++            android:id="@+id/debugSwitch"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="22dp"
++            android:minHeight="48dp"
++            android:text="@string/debug_info"
++            android:textColor="?android:attr/textColorPrimary"
++            android:textSize="14sp" />
++
+         <Button
+             android:id="@+id/startOverlay"
+             android:layout_width="match_parent"
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index 99bc1d6..a32b985 100644
+index 99bc1d6..7797082 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
-@@ -28,4 +28,7 @@
+@@ -28,4 +28,10 @@
      <string name="opacity_pct">%d%%</string>
      <string name="fade_never">Never hides</string>
      <string name="fade_secs">%d s</string>
 +    <string name="tv_a11y_help" translatable="false">This device has no Accessibility settings screen. Enable the service from a computer:\n\nadb shell settings put secure enabled_accessibility_services com.cybertkr.suboverlay/com.cybertkr.suboverlay.a11y.SubtitleSyncService\nadb shell settings put secure accessibility_enabled 1</string>
 +    <string name="tv_overlay_help" translatable="false">This device has no overlay permission screen. Grant it from a computer:\n\nadb shell appops set com.cybertkr.suboverlay SYSTEM_ALERT_WINDOW allow</string>
 +    <string name="tv_no_picker_help" translatable="false">This device has no file picker. Copy your .srt file into this folder from a computer, then tap Choose again:\n\n%1$s\n\nadb push file.srt %1$s/</string>
++    <string name="encoding_btn" translatable="false">Encoding: %1$s</string>
++    <string name="encoding_title" translatable="false">Subtitle encoding</string>
++    <string name="debug_info" translatable="false">Debug info (status on screen)</string>
  </resources>
 diff --git a/app/src/main/res/xml/a11y_config.xml b/app/src/main/res/xml/a11y_config.xml
 index b6f2384..5075f16 100644
@@ -698,3 +1254,48 @@ index b6f2384..5075f16 100644
 -    android:packageNames="com.netflix.mediaclient"
 +    android:packageNames="com.netflix.mediaclient,com.netflix.ninja"
      android:notificationTimeout="100" />
+diff --git a/core/src/main/kotlin/com/cybertkr/suboverlay/core/SrtText.kt b/core/src/main/kotlin/com/cybertkr/suboverlay/core/SrtText.kt
+index 0ff1382..77b81b0 100644
+--- a/core/src/main/kotlin/com/cybertkr/suboverlay/core/SrtText.kt
++++ b/core/src/main/kotlin/com/cybertkr/suboverlay/core/SrtText.kt
+@@ -6,14 +6,38 @@ import java.nio.charset.Charset
+ import java.nio.charset.CodingErrorAction
+ 
+ object SrtText {
+-    fun decode(bytes: ByteArray): String {
++    /**
++     * [encoding] is "auto" or a charset name such as "UTF-8", "windows-1250" (Central European /
++     * Serbian-Croatian Latin), "windows-1251" (Cyrillic) or "windows-1254" (Turkish).
++     */
++    fun decode(bytes: ByteArray, encoding: String = "auto"): String {
++        if (encoding != "auto") {
++            return try {
++                String(bytes, Charset.forName(encoding))
++            } catch (e: Exception) {
++                decode(bytes, "auto")
++            }
++        }
+         return try {
+             val decoder = Charsets.UTF_8.newDecoder()
+                 .onMalformedInput(CodingErrorAction.REPORT)
+                 .onUnmappableCharacter(CodingErrorAction.REPORT)
+             decoder.decode(ByteBuffer.wrap(bytes)).toString()
+         } catch (e: CharacterCodingException) {
+-            String(bytes, Charset.forName("windows-1254"))
++            String(bytes, Charset.forName(guessLegacy(bytes)))
++        }
++    }
++
++    // Not UTF-8: decide between Turkish (1254) and Central European (1250: Serbian/Croatian/Bosnian).
++    private fun guessLegacy(bytes: ByteArray): String {
++        var turkish = 0
++        var slavic = 0
++        for (b in bytes) {
++            when (b.toInt() and 0xFF) {
++                0xFE, 0xFD, 0xDD, 0xDE -> turkish++          // ş ı İ Ş
++                0x8A, 0x8E, 0x9A, 0x9E, 0xC6, 0xC8, 0xE6, 0xE8 -> slavic++ // Š Ž š ž Ć Č ć č
++            }
+         }
++        return if (turkish > slavic) "windows-1254" else "windows-1250"
+     }
+ }
