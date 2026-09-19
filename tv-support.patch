@@ -1,5 +1,5 @@
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index a0cd127..36ac12c 100644
+index a0cd127..a4b73a7 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -6,8 +6,12 @@
@@ -23,6 +23,23 @@ index a0cd127..36ac12c 100644
              </intent-filter>
          </activity>
  
+@@ -32,6 +37,16 @@
+                 android:value="Altyazı overlay oynatma yardımcısı" />
+         </service>
+ 
++        <service
++            android:name=".MediaSyncListener"
++            android:label="@string/a11y_label"
++            android:exported="true"
++            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
++            <intent-filter>
++                <action android:name="android.service.notification.NotificationListenerService" />
++            </intent-filter>
++        </service>
++
+         <service
+             android:name=".a11y.SubtitleSyncService"
+             android:label="@string/a11y_label"
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
 index 57ca1b1..d3faaa2 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/MainActivity.kt
@@ -175,6 +192,21 @@ index 57ca1b1..d3faaa2 100644
      private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
  
      private fun requestNotifIfNeeded() {
+diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/MediaSyncListener.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/MediaSyncListener.kt
+new file mode 100644
+index 0000000..e71db25
+--- /dev/null
++++ b/app/src/main/kotlin/com/cybertkr/suboverlay/MediaSyncListener.kt
+@@ -0,0 +1,9 @@
++package com.cybertkr.suboverlay
++
++import android.service.notification.NotificationListenerService
++
++/**
++ * Intentionally empty. Being an enabled notification listener is what allows the app to read the
++ * player's media session (its playback position). Notifications themselves are never read or stored.
++ */
++class MediaSyncListener : NotificationListenerService()
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
 index cb993dd..7a8a580 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/a11y/SubtitleSyncService.kt
@@ -377,10 +409,33 @@ index cb993dd..7a8a580 100644
 +    }
  }
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-index b555f02..3c08e46 100644
+index b555f02..be7b1c5 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
 +++ b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/OverlayService.kt
-@@ -40,6 +40,43 @@ class OverlayService : LifecycleService() {
+@@ -3,10 +3,14 @@ package com.cybertkr.suboverlay.overlay
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
+ import android.app.PendingIntent
++import android.content.ComponentName
+ import android.content.Context
+ import android.content.Intent
+ import android.content.pm.ServiceInfo
+ import android.graphics.PixelFormat
++import android.media.MediaMetadata
++import android.media.session.MediaSessionManager
++import android.media.session.PlaybackState
+ import android.os.Build
+ import android.os.Handler
+ import android.os.IBinder
+@@ -19,6 +23,7 @@ import androidx.lifecycle.LifecycleService
+ import androidx.lifecycle.lifecycleScope
+ import kotlinx.coroutines.launch
+ import com.cybertkr.suboverlay.MainActivity
++import com.cybertkr.suboverlay.MediaSyncListener
+ import com.cybertkr.suboverlay.R
+ import com.cybertkr.suboverlay.SubtitleRepository
+ import com.cybertkr.suboverlay.core.PlaybackClock
+@@ -40,10 +45,51 @@ class OverlayService : LifecycleService() {
              instance?.lastNetflixSeen = android.os.SystemClock.elapsedRealtime()
          }
  
@@ -391,6 +446,8 @@ index b555f02..3c08e46 100644
 +        @Volatile var dbgWin = "-"
 +        @Volatile var dbgBar = "-"
 +        @Volatile var dbgKey = "-"
++        @Volatile var dbgMs = "-"
++        private val NETFLIX_PKGS = setOf("com.netflix.mediaclient", "com.netflix.ninja")
 +
 +        fun netflixSeenRecently(): Boolean {
 +            val s = instance ?: return false
@@ -423,16 +480,27 @@ index b555f02..3c08e46 100644
 +
          fun bridgePosition(posMs: Long, totalMs: Long) {
              val s = instance ?: return
-             if (totalMs > 0L) s.totalMs = totalMs
-@@ -60,6 +97,7 @@ class OverlayService : LifecycleService() {
+-            if (totalMs > 0L) s.totalMs = totalMs
+             val now = android.os.SystemClock.elapsedRealtime()
++            // When the media session provides the position, it wins over the accessibility seek bar.
++            if (now - s.lastMediaSync < 3000L) return
++            if (totalMs > 0L) s.totalMs = totalMs
+             val target = posMs + s.userOffsetMs
+             if (!s.autoSynced) {
+                 s.clock.start(now, target)
+@@ -60,6 +106,11 @@ class OverlayService : LifecycleService() {
      private var totalMs: Long = 0L
      private var autoSynced = false
      @Volatile private var lastNetflixSeen = 0L
 +    @Volatile private var adjustUntil = 0L
++    @Volatile private var lastMediaSync = 0L
++    private var lastMediaStamp = -1L
++    private var lastMediaState = -1
++    private var lastMediaPos = -1L
      private var userOffsetMs = 0L
      private val settings by lazy { com.cybertkr.suboverlay.SettingsStore(this) }
  
-@@ -72,7 +110,13 @@ class OverlayService : LifecycleService() {
+@@ -72,7 +123,13 @@ class OverlayService : LifecycleService() {
              val now = SystemClock.elapsedRealtime()
              val pos = clock.position(now)
              val hidden = now - lastNetflixSeen >= 3000L
@@ -447,7 +515,33 @@ index b555f02..3c08e46 100644
              if (this@OverlayService::bubble.isInitialized) {
                  bubble.updateTime(pos.coerceIn(0, totalMs), totalMs)
              }
-@@ -109,18 +153,30 @@ class OverlayService : LifecycleService() {
+@@ -80,6 +137,17 @@ class OverlayService : LifecycleService() {
+         }
+     }
+ 
++    private val mediaPoll = object : Runnable {
++        override fun run() {
++            try {
++                pollMedia()
++            } catch (e: Exception) {
++                dbgMs = "err ${e.javaClass.simpleName}"
++            }
++            mainHandler.postDelayed(this, 500L)
++        }
++    }
++
+     override fun onCreate() {
+         super.onCreate()
+         instance = this
+@@ -90,6 +158,7 @@ class OverlayService : LifecycleService() {
+         engine = TimelineEngine(SubtitleRepository.cues)
+         totalMs = SubtitleRepository.cues.maxOfOrNull { it.endMs } ?: 0L
+         ticker.post(tickRunnable)
++        mainHandler.post(mediaPoll)
+         addBubble()
+         lifecycleScope.launch {
+             val alpha = settings.getIdleAlphaPercent()
+@@ -109,18 +178,81 @@ class OverlayService : LifecycleService() {
          ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = 160 }
  
          bubble = ControlBubble(this, wm, bubbleParams, object : ControlBubble.Callbacks {
@@ -475,7 +569,58 @@ index b555f02..3c08e46 100644
 +    private fun debugHud(hidden: Boolean): String =
 +        "Subly+ debug (disappears once synced)\n" +
 +            "a11y=${if (a11yConnected) "ON" else "OFF"}  win=$dbgWin  bar=$dbgBar\n" +
++            "media: $dbgMs\n" +
 +            "netflix=${if (hidden) "no" else "yes"}  lastKey=$dbgKey  cues=${SubtitleRepository.cues.size}"
++
++    // Position source for players (like Netflix on Android TV) that hide their seek bar from
++    // accessibility: read the app's MediaSession. Needs notification-listener access.
++    private fun pollMedia() {
++        val enabled = androidx.core.app.NotificationManagerCompat
++            .getEnabledListenerPackages(this).contains(packageName)
++        if (!enabled) { dbgMs = "listener access OFF"; return }
++        val msm = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
++        val sessions = try {
++            msm.getActiveSessions(ComponentName(this, MediaSyncListener::class.java))
++        } catch (_: SecurityException) {
++            dbgMs = "no access to sessions"; return
++        }
++        val nf = sessions.firstOrNull { it.packageName in NETFLIX_PKGS }
++        if (nf == null) {
++            val names = sessions.joinToString(",") { it.packageName.removePrefix("com.") }
++            dbgMs = "no Netflix session (" + (if (names.isEmpty()) "none" else names) + ")"
++            return
++        }
++        val st = nf.playbackState
++        if (st == null) { dbgMs = "Netflix session, no state"; return }
++        val now = SystemClock.elapsedRealtime()
++        val playing = st.state == PlaybackState.STATE_PLAYING
++        val speed = if (st.playbackSpeed > 0f) st.playbackSpeed else 1f
++        val stamp = st.lastPositionUpdateTime
++        val pos = if (playing && stamp > 0L) st.position + ((now - stamp) * speed).toLong() else st.position
++        val dur = nf.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
++        dbgMs = "state=${st.state} pos=${pos / 1000}s dur=${dur / 1000}s"
++        if (st.position < 0L) { dbgMs += " (no position)"; return }
++        lastMediaSync = now
++        val changed = stamp != lastMediaStamp || st.state != lastMediaState || st.position != lastMediaPos
++        if (changed || !autoSynced) {
++            lastMediaStamp = stamp; lastMediaState = st.state; lastMediaPos = st.position
++            applyMedia(pos, playing, dur)
++        }
++    }
++
++    private fun applyMedia(posMs: Long, playing: Boolean, total: Long) {
++        if (total > 0L) totalMs = total
++        val now = SystemClock.elapsedRealtime()
++        val target = posMs + userOffsetMs
++        if (!autoSynced) {
++            clock.start(now, target)
++            autoSynced = true
++        } else if (kotlin.math.abs(target - clock.position(now)) > 300L) {
++            clock.syncTo(now, target)
++        }
++        if (playing && !clock.isRunning) clock.resume(now)
++        else if (!playing && clock.isRunning) clock.pause(now)
++    }
 +
 +    private fun adjustHud(): String {
 +        val secs = String.format(java.util.Locale.US, "%+.1f", userOffsetMs / 1000.0)
@@ -485,6 +630,14 @@ index b555f02..3c08e46 100644
      private fun addSubtitleWindow() {
          subtitleView = SubtitleView(this)
          val subtitleParams = WindowManager.LayoutParams(
+@@ -174,6 +306,7 @@ class OverlayService : LifecycleService() {
+ 
+     override fun onDestroy() {
+         ticker.removeCallbacks(tickRunnable)
++        mainHandler.removeCallbacks(mediaPoll)
+         if (this::bubble.isInitialized) wm.removeView(bubble.view())
+         if (this::subtitleView.isInitialized) wm.removeView(subtitleView)
+         instance = null
 diff --git a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt b/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
 index 5859591..f6d27e9 100644
 --- a/app/src/main/kotlin/com/cybertkr/suboverlay/overlay/SubtitleView.kt
