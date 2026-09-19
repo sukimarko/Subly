@@ -11,6 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply Android TV / Shield patch
+        run: |
+          if [ -f tv-support.patch ]; then
+            git apply --ignore-whitespace tv-support.patch
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
